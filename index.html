@@ -8,29 +8,12 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Tesseract.js (OCRエンジン) の読み込み -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <!-- pdf-lib と fontkit の読み込み (PDF直接生成用) -->
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
     <style>
         /* デフォルトのフォント */
         body { font-family: 'Inter', 'Noto Sans JP', sans-serif; }
-        
-        /* 画面表示用：印刷エリアは隠す */
-        @media screen {
-            #print-area { display: none !important; }
-        }
-
-        /* 印刷（PDF保存）時用：メインのUIを隠し、印刷エリアのみを表示する */
-        @media print {
-            body { background: transparent; }
-            #app-container { display: none !important; }
-            #print-area {
-                display: block !important;
-                position: absolute;
-                left: 0;
-                top: 0;
-                /* 背景画像などを正確に印刷させるための設定 */
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-            }
-        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen text-gray-800">
@@ -95,7 +78,7 @@
                         </div>
                         <div class="ml-3">
                             <p class="text-sm text-blue-800">
-                                <strong>綺麗にPDFを保存するコツ：</strong> 次の画面（印刷ダイアログ）の「詳細設定」で、<strong>余白を「なし」</strong>、<strong>「ヘッダーとフッター」のチェックを外して</strong>「PDFとして保存」してください。
+                                <strong>読み取り完了！</strong> 「OCR対応PDFとして保存」ボタンを押すと、自動的にPDFファイルがダウンロードされます。
                             </p>
                         </div>
                     </div>
@@ -118,9 +101,6 @@
         </main>
     </div>
 
-    <!-- PDF印刷時に文字を画像の上に重ねるためのエリア -->
-    <div id="print-area"></div>
-
     <script>
         // --- DOM要素の取得 ---
         const dropZone = document.getElementById('drop-zone');
@@ -138,7 +118,6 @@
         const btnSavePdf = document.getElementById('btn-save-pdf');
         const btnCopy = document.getElementById('btn-copy');
         const extractedText = document.getElementById('extracted-text');
-        const printArea = document.getElementById('print-area');
 
         // --- 状態変数 ---
         let uploadedImageSrc = null;
@@ -296,123 +275,126 @@
             });
         });
 
-        // --- STREAMING_CHUNK:検索可能PDF(印刷)用DOMの生成 ---
-        function preparePrintArea() {
-            printArea.innerHTML = '';
+        // --- STREAMING_CHUNK:PDF生成・ダウンロード処理 (pdf-lib) ---
+        // Canvasを使って画像をJPEGバイナリとして取得する補助関数
+        async function getImageBytesForPdf(imgElement) {
+            const canvas = document.createElement('canvas');
+            canvas.width = imgElement.naturalWidth;
+            canvas.height = imgElement.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(imgElement, 0, 0);
             
-            // 画像の元の解像度 (ピクセル)
-            const imgWidth = imageElement.naturalWidth;
-            const imgHeight = imageElement.naturalHeight;
-
-            // 印刷エリアのサイズを画像の解像度と完全に一致させる
-            printArea.style.width = `${imgWidth}px`;
-            printArea.style.height = `${imgHeight}px`;
-            printArea.style.position = 'relative';
-
-            // 1. 元の画像を背景として配置
-            const img = document.createElement('img');
-            img.src = uploadedImageSrc;
-            img.style.position = 'absolute';
-            img.style.top = '0';
-            img.style.left = '0';
-            img.style.width = `${imgWidth}px`;
-            img.style.height = `${imgHeight}px`;
-            img.style.zIndex = '1';
-            printArea.appendChild(img);
-
-            // 2. OCRで取得したテキストを画像の上に絶対配置
-            // 【重要な修正】
-            // 前回は「単語単位(words)」で細かく配置したため、日本語環境ではPDF上でコピーした際に
-            // 順序が崩れたり空白が混ざる原因となっていました。
-            // これを「行単位(lines)」でまとめて配置することで、自然な文章として選択可能にします。
-            if (ocrResult && ocrResult.data && ocrResult.data.lines) {
-                ocrResult.data.lines.forEach(line => {
-                    if (!line.text || !line.text.trim()) return;
-
-                    const span = document.createElement('span');
-                    const bbox = line.bbox; // x0, y0, x1, y1
-                    
-                    // 文字列のクリーンアップ（不要なスペースの削除）
-                    const jpChars = '[一-龠ぁ-んァ-ヶｦ-ﾟー、。！？「」【】（）]';
-                    let cleanedLineText = line.text.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=${jpChars})`, 'gu'), '');
-                    cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=[A-Za-z0-9])`, 'gu'), '');
-                    cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=[A-Za-z0-9])[ \\t]+(?=${jpChars})`, 'gu'), '');
-
-                    span.textContent = cleanedLineText;
-                    span.style.position = 'absolute';
-                    
-                    // 画像サイズ(ピクセル)に対する絶対座標で配置
-                    span.style.left = `${bbox.x0}px`;
-                    span.style.top = `${bbox.y0}px`;
-                    span.style.width = `${bbox.x1 - bbox.x0}px`;
-                    span.style.height = `${bbox.y1 - bbox.y0}px`;
-                    
-                    // 行の高さに合わせてフォントサイズを設定
-                    const boxHeight = bbox.y1 - bbox.y0;
-                    span.style.fontSize = `${boxHeight * 0.9}px`;
-                    
-                    // テキストをほぼ透明にしつつ、PDF上ではテキストデータとして残す設定
-                    span.style.color = 'rgba(0, 0, 0, 0.01)';
-                    span.style.zIndex = '2';
-                    span.style.userSelect = 'text'; // 明示的に選択可能にする
-                    
-                    // テキストの配置調整
-                    span.style.display = 'flex';
-                    span.style.alignItems = 'center';
-                    span.style.justifyContent = 'flex-start';
-                    span.style.fontFamily = 'sans-serif';
-                    span.style.whiteSpace = 'nowrap';
-                    span.style.overflow = 'hidden';
-                    
-                    printArea.appendChild(span);
-                });
-            }
-
-            // 3. 印刷時のページサイズを1ページに収める設定
-            let printStyle = document.getElementById('dynamic-print-style');
-            if (!printStyle) {
-                printStyle = document.createElement('style');
-                printStyle.id = 'dynamic-print-style';
-                document.head.appendChild(printStyle);
-            }
+            // PDF埋め込み用にJPEGとして取得 (品質0.9)
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
             
-            // ピクセルサイズを直接指定し、ページを画像サイズに完全に合わせる
-            printStyle.textContent = `
-                @media print { 
-                    @page { 
-                        size: ${imgWidth}px ${imgHeight}px; 
-                        margin: 0 !important; 
-                    } 
-                    body, html { 
-                        margin: 0 !important; 
-                        padding: 0 !important;
-                    }
-                    #print-area {
-                        display: block !important;
-                        position: absolute;
-                        left: 0;
-                        top: 0;
-                        width: ${imgWidth}px !important;
-                        height: ${imgHeight}px !important;
-                        page-break-after: avoid !important;
-                        page-break-before: avoid !important;
-                        page-break-inside: avoid !important;
-                        break-inside: avoid !important;
-                    }
-                }
-            `;
+            // DataURL -> Uint8Array に変換
+            const base64Data = dataUrl.split(',')[1];
+            const binaryString = atob(base64Data);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes;
         }
 
-        // --- PDF保存ボタンのイベント ---
-        btnSavePdf.addEventListener('click', () => {
-            preparePrintArea();
-            
-            // DOMの描画完了を少し待ってから印刷ダイアログを呼び出す
-            setTimeout(() => {
-                window.print();
-            }, 300);
-        });
+        btnSavePdf.addEventListener('click', async () => {
+            // ボタンをローディング状態にする
+            const originalText = btnSavePdf.innerHTML;
+            btnSavePdf.disabled = true;
+            btnSavePdf.classList.add('opacity-75', 'cursor-not-allowed');
+            btnSavePdf.innerHTML = `<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>PDFを作成中...`;
 
+            try {
+                // pdf-libの初期化
+                const { PDFDocument, rgb } = PDFLib;
+                const pdfDoc = await PDFDocument.create();
+                
+                // 日本語をPDF上でコピー・検索可能にするためフォントを埋め込む準備
+                pdfDoc.registerFontkit(fontkit);
+                
+                // CDNから日本語フォントを取得 (※初回は数MBのダウンロードがあるため少し時間がかかります)
+                const fontUrl = 'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf';
+                const fontBytes = await fetch(fontUrl).then(res => res.arrayBuffer());
+                const customFont = await pdfDoc.embedFont(fontBytes);
+
+                // 画像をJPEGのバイナリとして取得し、PDFドキュメントに埋め込む
+                const imgBytes = await getImageBytesForPdf(imageElement);
+                const pdfImage = await pdfDoc.embedJpg(imgBytes); 
+                
+                const imgWidth = imageElement.naturalWidth;
+                const imgHeight = imageElement.naturalHeight;
+
+                // ページを画像のピクセルサイズぴったりに合わせて追加
+                const page = pdfDoc.addPage([imgWidth, imgHeight]);
+
+                // ページ全体に画像を敷き詰めて描画
+                page.drawImage(pdfImage, {
+                    x: 0,
+                    y: 0,
+                    width: imgWidth,
+                    height: imgHeight,
+                });
+
+                // OCRのテキスト結果を画像の上に「完全に透明」にして配置
+                if (ocrResult && ocrResult.data && ocrResult.data.lines) {
+                    ocrResult.data.lines.forEach(line => {
+                        if (!line.text || !line.text.trim()) return;
+
+                        const bbox = line.bbox; // x0, y0, x1, y1
+                        
+                        // 文字列のクリーンアップ（不要なスペースの削除）
+                        const jpChars = '[一-龠ぁ-んァ-ヶｦ-ﾟー、。！？「」【】（）]';
+                        let cleanedLineText = line.text.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=${jpChars})`, 'gu'), '');
+                        cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=[A-Za-z0-9])`, 'gu'), '');
+                        cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=[A-Za-z0-9])[ \\t]+(?=${jpChars})`, 'gu'), '');
+
+                        // 行の高さと文字サイズを計算
+                        const boxHeight = bbox.y1 - bbox.y0;
+                        const fontSize = boxHeight * 0.8;
+
+                        // pdf-libの座標系は「左下」が原点 (0,0) となるため、Y座標を変換する
+                        // bbox.y1 がテキストの下端なので、画像の下端からの距離は imgHeight - bbox.y1
+                        // Y座標はテキストのベースラインを指すため、少し位置を調整
+                        const pdfY = imgHeight - bbox.y1 + (boxHeight * 0.2);
+
+                        // テキストの描画 (完全に透明にして見えなくするが、データとしては存在する)
+                        page.drawText(cleanedLineText, {
+                            x: bbox.x0,
+                            y: pdfY,
+                            size: fontSize,
+                            font: customFont,
+                            color: rgb(0, 0, 0),
+                            opacity: 0, // 不透明度0
+                        });
+                    });
+                }
+
+                // PDFをバイナリとして生成
+                const pdfFileBytes = await pdfDoc.save();
+                
+                // Blobに変換して自動ダウンロードを開始
+                const blob = new Blob([pdfFileBytes], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'ocr_document.pdf'; // 保存されるファイル名
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+            } catch (error) {
+                console.error('PDF Generation Error:', error);
+                alert('PDFの作成中にエラーが発生しました。\n(※初回は日本語フォントのダウンロードに時間がかかる場合があります)');
+            } finally {
+                // ボタンの状態を元に戻す
+                btnSavePdf.disabled = false;
+                btnSavePdf.classList.remove('opacity-75', 'cursor-not-allowed');
+                btnSavePdf.innerHTML = originalText;
+            }
+        });
     </script>
 </body>
 </html>

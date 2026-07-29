@@ -440,35 +440,56 @@
                         height: imgHeight,
                     });
                     
-                    // 単語(Word)単位で透明なテキストを配置し、位置ズレを最小限にする
-                    if (ocrResult && ocrResult.data && ocrResult.data.words) {
-                        ocrResult.data.words.forEach(word => {
-                            // 認識信頼度が低い（40未満など）場合は、ノイズや罫線の誤認として除外（ゴミ文字対策）
-                            if (word.confidence < 40) return;
+                    // --- 修正: Word単位ではなくLine単位で配置し、ハイライトを滑らかにする ---
+                    if (ocrResult && ocrResult.data && ocrResult.data.lines) {
+                        ocrResult.data.lines.forEach(line => {
+                            // 行内の信頼度が極端に低い場合はスキップ
+                            if (line.confidence < 30) return;
 
-                            // 単語内の不要なスペースを除去
-                            const text = word.text.replace(/\s+/g, '');
+                            // 行のテキストから不要なスペースを除去（自然なテキストにするため）
+                            // ※ここでのテキストは抽出用ではなく、PDF上の透明な選択用テキスト
+                            let text = removeUnnaturalSpaces(line.text);
+                            text = text.replace(/\n/g, '').trim(); // 改行は確実に削除
                             if (!text) return;
 
-                            const bbox = word.bbox;
+                            const bbox = line.bbox;
                             
-                            // 座標とサイズの計算
-                            const wordWidth = bbox.x1 - bbox.x0;
-                            const wordHeight = bbox.y1 - bbox.y0;
+                            // 行全体の座標とサイズ
+                            const lineWidth = bbox.x1 - bbox.x0;
+                            const lineHeight = bbox.y1 - bbox.y0;
                             
-                            // フォントサイズは高さベースにするが、少し小さめに（はみ出し防止）
-                            let fontSize = wordHeight * 0.8;
+                            // 1. フォントサイズ（高さ）の決定
+                            // 枠の高さの約80%をベースサイズとする
+                            const fontSize = lineHeight * 0.8;
                             
-                            // 横幅が狭い（文字が詰まっている）場合は横幅に合わせてフォントサイズを縮小
-                            const estCharWidth = wordWidth / text.length;
-                            if (estCharWidth < fontSize) {
-                                fontSize = estCharWidth * 1.1; 
+                            // 2. テキスト描画幅の計算
+                            // フォントとサイズを指定して、このテキストを描画したときの実際の幅（ピクセル）を計算
+                            const textWidth = customFont.widthOfTextAtSize(text, fontSize);
+                            
+                            // 3. 横幅のスケーリング（引き伸ばし/縮小）比率の計算
+                            // 実際の認識枠の幅(lineWidth)に、テキスト幅(textWidth)を強制的に合わせるための比率
+                            let scaleX = 1.0;
+                            if (textWidth > 0) {
+                                scaleX = lineWidth / textWidth;
                             }
                             
-                            // PDFの座標系(左下原点)への変換と、日本語フォントのベースライン(下端の余白)補正
-                            const pdfY = canvas.height - bbox.y1 + (fontSize * 0.2);
+                            // PDFの座標系(左下原点)への変換。
+                            // 日本語のベースライン（文字の下端）を考慮し、枠の下端(bbox.y1)から少し(20%)持ち上げる
+                            const pdfY = canvas.height - bbox.y1 + (lineHeight * 0.2);
                             
                             try {
+                                // drawTextはそのまま使用するが、フォント自体を変形させることはできないため、
+                                // 代わりに座標系全体を一時的にスケーリングしてテキストを描画する手法をとる
+                                
+                                page.pushOperators(
+                                    PDFLib.pushGraphicsState(),
+                                    // X方向(横)だけscaleX倍に拡大縮小し、Y方向(縦)は1倍のまま
+                                    // 行の先頭座標(x0, pdfY)を基準にしてスケーリングを行う
+                                    PDFLib.translate(bbox.x0, pdfY),
+                                    PDFLib.scale(scaleX, 1.0),
+                                    PDFLib.translate(-bbox.x0, -pdfY)
+                                );
+
                                 page.drawText(text, {
                                     x: bbox.x0,
                                     y: pdfY,
@@ -477,6 +498,9 @@
                                     color: rgb(0, 0, 0),
                                     opacity: 0, // 透明度0で完全に見えないが、選択可能
                                 });
+                                
+                                page.pushOperators(PDFLib.popGraphicsState());
+
                             } catch (e) {
                                 console.warn('テキスト配置スキップ (認識不能文字):', text);
                             }

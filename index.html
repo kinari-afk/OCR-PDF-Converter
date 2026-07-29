@@ -329,14 +329,14 @@
         }
 
         // PDFの直接生成とダウンロード (pdf-lib)
-        document.getElementById('btn-save-pdf').addEventListener('click', async () => {
-            const btn = document.getElementById('btn-save-pdf');
-            const btnText = btn.querySelector('span');
-            const originalHtml = btn.innerHTML;
+        const btnSavePdf = document.getElementById('btn-save-pdf');
+        btnSavePdf.addEventListener('click', async () => {
+            const btnText = btnSavePdf.querySelector('span');
+            const originalHtml = btnSavePdf.innerHTML;
             
             // ボタンをローディング状態にする
-            btn.innerHTML = '<svg class="animate-spin w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> PDFを作成中...';
-            btn.disabled = true;
+            btnSavePdf.innerHTML = '<svg class="animate-spin w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> PDFを作成中...';
+            btnSavePdf.disabled = true;
             
             try {
                 const { PDFDocument, rgb } = PDFLib;
@@ -344,16 +344,16 @@
                 
                 // 日本語フォントを利用するための登録
                 pdfDoc.registerFontkit(window.fontkit);
-                // Google FontsからNoto Sans JPを直接取得
-                const fontUrl = 'https://fonts.gstatic.com/ea/notosansjapanese/v6/NotoSansJP-Regular.otf';
-                const fontBytes = await fetch(fontUrl).then(res => res.arrayBuffer());
+                
+                // --- 修正: より安定したCDNから日本語フォントを取得 ---
+                const fontUrl = 'https://cdn.jsdelivr.net/npm/typeface-notosans-jp/NotoSansJP-Regular.otf';
+                const fontBytes = await fetch(fontUrl).then(res => {
+                    if (!res.ok) throw new Error(`フォントの取得に失敗しました: ${res.status} ${res.statusText}`);
+                    return res.arrayBuffer();
+                });
                 const customFont = await pdfDoc.embedFont(fontBytes);
                 
-                // 各ページ（Canvas）をPDFのページとして追加
-                for (let i = 0; i < pdfPagesImages.length; i++) {
-                    const canvas = pdfPagesImages[i];
-                    const ocrResult = pdfOcrResults[i];
-                    
+                if (isPdfMode) {
                     const imgBytes = await getCanvasBytes(canvas);
                     const pdfImage = await pdfDoc.embedJpg(imgBytes);
                     

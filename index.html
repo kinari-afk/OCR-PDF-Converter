@@ -353,7 +353,11 @@
                 });
                 const customFont = await pdfDoc.embedFont(fontBytes);
                 
-                if (isPdfMode) {
+                // 画像・PDFに関わらず保持している全ページをループして処理
+                for (let i = 0; i < pdfPagesImages.length; i++) {
+                    const canvas = pdfPagesImages[i];
+                    const ocrResult = pdfOcrResults[i];
+                    
                     const imgBytes = await getCanvasBytes(canvas);
                     const pdfImage = await pdfDoc.embedJpg(imgBytes);
                     
@@ -369,7 +373,6 @@
                     });
                     
                     // 行(Line)単位で透明なテキストを配置
-                    // 単語単位だと順序がおかしくなるため、行単位で処理
                     if (ocrResult && ocrResult.data && ocrResult.data.lines) {
                         ocrResult.data.lines.forEach(line => {
                             const text = removeUnnaturalSpaces(line.text);
@@ -413,9 +416,9 @@
                 console.error('PDF Generation Error:', error);
                 alert('PDFの作成中にエラーが発生しました。\n(※初回は日本語フォントのダウンロードに数秒かかる場合があります)\n詳細: ' + error.message);
             } finally {
-                // ボタンの状態を元に戻す
-                btn.innerHTML = originalHtml;
-                btn.disabled = false;
+                // ボタンの状態を元に戻す (変数名を修正)
+                btnSavePdf.innerHTML = originalHtml;
+                btnSavePdf.disabled = false;
             }
         });
     </script>

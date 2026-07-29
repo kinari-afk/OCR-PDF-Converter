@@ -321,21 +321,24 @@
             printArea.appendChild(img);
 
             // 2. OCRで取得したテキストを画像の上に絶対配置
-            // 1文字(symbols)だと選択しづらいため、まとまり(words)単位で配置
-            if (ocrResult && ocrResult.data && ocrResult.data.words) {
-                ocrResult.data.words.forEach(word => {
-                    if (!word.text || !word.text.trim()) return;
+            // 【重要な修正】
+            // 前回は「単語単位(words)」で細かく配置したため、日本語環境ではPDF上でコピーした際に
+            // 順序が崩れたり空白が混ざる原因となっていました。
+            // これを「行単位(lines)」でまとめて配置することで、自然な文章として選択可能にします。
+            if (ocrResult && ocrResult.data && ocrResult.data.lines) {
+                ocrResult.data.lines.forEach(line => {
+                    if (!line.text || !line.text.trim()) return;
 
                     const span = document.createElement('span');
-                    const bbox = word.bbox; // x0, y0, x1, y1
+                    const bbox = line.bbox; // x0, y0, x1, y1
                     
                     // 文字列のクリーンアップ（不要なスペースの削除）
                     const jpChars = '[一-龠ぁ-んァ-ヶｦ-ﾟー、。！？「」【】（）]';
-                    let cleanedWordText = word.text.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=${jpChars})`, 'gu'), '');
-                    cleanedWordText = cleanedWordText.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=[A-Za-z0-9])`, 'gu'), '');
-                    cleanedWordText = cleanedWordText.replace(new RegExp(`(?<=[A-Za-z0-9])[ \\t]+(?=${jpChars})`, 'gu'), '');
+                    let cleanedLineText = line.text.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=${jpChars})`, 'gu'), '');
+                    cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=[A-Za-z0-9])`, 'gu'), '');
+                    cleanedLineText = cleanedLineText.replace(new RegExp(`(?<=[A-Za-z0-9])[ \\t]+(?=${jpChars})`, 'gu'), '');
 
-                    span.textContent = cleanedWordText;
+                    span.textContent = cleanedLineText;
                     span.style.position = 'absolute';
                     
                     // 画像サイズ(ピクセル)に対する絶対座標で配置
@@ -344,8 +347,7 @@
                     span.style.width = `${bbox.x1 - bbox.x0}px`;
                     span.style.height = `${bbox.y1 - bbox.y0}px`;
                     
-                    // 【重要】フォントサイズをピクセル単位で正しく設定（高さに合わせる）
-                    // 以前は%指定だったため、極小サイズになりブラウザに除外されていた可能性が高い
+                    // 行の高さに合わせてフォントサイズを設定
                     const boxHeight = bbox.y1 - bbox.y0;
                     span.style.fontSize = `${boxHeight * 0.9}px`;
                     

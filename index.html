@@ -225,6 +225,10 @@
         let pdfOcrResults = [];     // PDF複数ページの場合の結果配列
         let pdfOcrScales = [];      // 各ページのOCRスケール
 
+        // 事前生成しておくPDF（スマホの共有APIをタップ直後に呼べるようにするため）
+        let generatedPdfBlob = null;
+        let pdfBuildPromise = null;
+
         // ---- トースト表示ヘルパー ----
         let toastTimer = null;
         function showToast(message, type = 'default') {
@@ -251,6 +255,8 @@
             pdfPageCanvases = [];
             pdfOcrResults = [];
             pdfOcrScales = [];
+            generatedPdfBlob = null;
+            pdfBuildPromise = null;
 
             previewImage.src = '';
             extractedText.value = '';
@@ -567,6 +573,9 @@
                 resultTextArea.classList.add('flex');
                 showToast('テキストの認識が完了しました', 'success');
 
+                // 保存ボタンを即座に押せるよう、PDFを裏で先に生成しておく
+                schedulePdfBuild();
+
             } catch (error) {
                 console.error(error);
                 showToast('OCR処理中にエラーが発生しました', 'error');
@@ -613,6 +622,166 @@
             });
         }
 
+        // OCR結果からOCR対応PDFを生成し、Blobを返す
+        async function buildPdfBlob() {
+            const pdfDoc = await PDFLib.PDFDocument.create();
+            pdfDoc.registerFontkit(window.fontkit);
+
+            // 日本語フォントを取得
+            const fontUrl = 'https://cdn.jsdelivr.net/npm/typeface-notosans-jp@1.0.1/NotoSansJP-Regular.otf';
+            let fontBytes;
+            try {
+                const fontRes = await fetch(fontUrl);
+                if (!fontRes.ok) throw new Error(`HTTP error! status: ${fontRes.status}`);
+                fontBytes = await fontRes.arrayBuffer();
+            } catch (fetchErr) {
+                console.error("Font fetch error:", fetchErr);
+                throw new Error("日本語フォントのダウンロードに失敗しました。通信環境を確認してください。");
+            }
+            const customFont = await pdfDoc.embedFont(fontBytes);
+
+            // --- 共通のページ生成処理関数 ---
+            // ocrScale: OCR結果のbbox座標を画像座標へ戻す倍率
+            async function createPdfPage(pdfDoc, imgBytes, imgWidth, imgHeight, ocrResult, ocrScale, font) {
+                const page = pdfDoc.addPage([imgWidth, imgHeight]);
+                const pdfImage = await pdfDoc.embedJpg(imgBytes);
+
+                page.drawImage(pdfImage, { x: 0, y: 0, width: imgWidth, height: imgHeight });
+
+                if (ocrResult && ocrResult.data && ocrResult.data.lines) {
+                    ocrResult.data.lines.forEach(line => {
+                        let validWords = line.words.filter(w => w.confidence >= CONFIDENCE_THRESHOLD);
+                        if (validWords.length === 0) return;
+
+                        validWords.forEach(word => {
+                            let text = removeUnnaturalSpaces(word.text).replace(/\n/g, '').trim();
+                            if (!text) return;
+
+                            // bbox座標を画像座標系へ変換
+                            const x0 = word.bbox.x0 / ocrScale;
+                            const y0 = word.bbox.y0 / ocrScale;
+                            const x1 = word.bbox.x1 / ocrScale;
+                            const y1 = word.bbox.y1 / ocrScale;
+                            const lineWidth = x1 - x0;
+                            const lineHeight = y1 - y0;
+                            if (lineWidth <= 0 || lineHeight <= 0) return;
+
+                            const fontSize = lineHeight * 0.8;
+                            const textWidth = font.widthOfTextAtSize(text, fontSize);
+
+                            let scaleX = 1;
+                            if (textWidth > 0) {
+                                scaleX = lineWidth / textWidth;
+                            }
+
+                            const yPos = imgHeight - y1 + (lineHeight * 0.1);
+
+                            page.pushOperators(
+                                PDFLib.pushGraphicsState(),
+                                PDFLib.concatTransformationMatrix(scaleX, 0, 0, 1, x0, yPos)
+                            );
+
+                            page.drawText(text, {
+                                x: 0,
+                                y: 0,
+                                size: fontSize,
+                                font: font,
+                                color: PDFLib.rgb(0, 0, 0),
+                                opacity: 0, // 完全に透明
+                            });
+
+                            page.pushOperators(PDFLib.popGraphicsState());
+                        });
+                    });
+                }
+            }
+
+            if (isPdfMode) {
+                // --- 複数ページ（PDF）モード ---
+                for (let i = 0; i < pdfPageCanvases.length; i++) {
+                    const canvas = pdfPageCanvases[i];
+                    const result = pdfOcrResults[i];
+                    const scale = pdfOcrScales[i] || 1;
+                    const imgBytes = await getCanvasBytes(canvas);
+                    await createPdfPage(pdfDoc, imgBytes, canvas.width, canvas.height, result, scale, customFont);
+                }
+            } else {
+                // --- 単一画像モード ---
+                const canvas = document.createElement('canvas');
+                canvas.width = previewImage.naturalWidth;
+                canvas.height = previewImage.naturalHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(previewImage, 0, 0);
+                const imgBytes = await getCanvasBytes(canvas);
+
+                await createPdfPage(pdfDoc, imgBytes, canvas.width, canvas.height, ocrResultData, ocrResultScale, customFont);
+            }
+
+            const pdfBytes = await pdfDoc.save();
+            return new Blob([pdfBytes], { type: 'application/pdf' });
+        }
+
+        // OCR完了後、保存ボタンを押した瞬間に共有できるようPDFを先行生成しておく
+        function schedulePdfBuild() {
+            generatedPdfBlob = null;
+            pdfBuildPromise = buildPdfBlob()
+                .then(blob => { generatedPdfBlob = blob; return blob; })
+                .catch(err => {
+                    // エラーは実際に保存を押したときに表示する
+                    console.error('PDF pre-build error:', err);
+                    pdfBuildPromise = null;
+                    throw err;
+                });
+            // 未処理のPromise拒否として警告が出ないように無害化
+            pdfBuildPromise.catch(() => {});
+        }
+
+        // 生成済みのPDFを端末へ渡す。
+        // スマホでは共有/保存シート（Web Share API）を使い、保存先を選べてアプリに戻れるようにする。
+        // PC等では従来どおりファイルとしてダウンロードする。
+        async function deliverPdf(blob, fileName) {
+            const ua = navigator.userAgent || '';
+            const isIOS = /iP(hone|ad|od)/.test(ua) ||
+                          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const isMobile = isIOS || /Android/.test(ua);
+
+            // モバイル：ネイティブの共有/保存シートを使う
+            if (isMobile && navigator.canShare) {
+                try {
+                    const file = new File([blob], fileName, { type: 'application/pdf' });
+                    if (navigator.canShare({ files: [file] })) {
+                        await navigator.share({ files: [file], title: fileName });
+                        showToast('PDFを保存/共有しました', 'success');
+                        return;
+                    }
+                } catch (e) {
+                    if (e && e.name === 'AbortError') {
+                        // ユーザーが共有をキャンセル：そのままアプリ画面に戻るだけ
+                        return;
+                    }
+                    // それ以外は通常ダウンロードへフォールバック
+                    console.warn('share failed, fallback to download:', e);
+                }
+            }
+
+            // フォールバック：通常のファイルダウンロード
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            if (isIOS) {
+                // iOS Safariで同一タブ遷移してアプリに戻れなくなるのを避ける
+                a.target = '_blank';
+                a.rel = 'noopener';
+            }
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            // モバイルでは即時revokeするとダウンロード/表示が中断されるため遅延させる
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+            showToast('PDFを保存しました（「ダウンロード」／「ファイル」をご確認ください）', 'success');
+        }
+
         btnSavePdf.addEventListener('click', async () => {
             // UI更新（ローディング表示）
             btnSavePdf.disabled = true;
@@ -620,119 +789,12 @@
             pdfBtnText.innerHTML = '<span class="spinner"></span>作成中...';
 
             try {
-                const pdfDoc = await PDFLib.PDFDocument.create();
-                pdfDoc.registerFontkit(window.fontkit);
-
-                // 日本語フォントを取得
-                const fontUrl = 'https://cdn.jsdelivr.net/npm/typeface-notosans-jp@1.0.1/NotoSansJP-Regular.otf';
-                let fontBytes;
-                try {
-                    const fontRes = await fetch(fontUrl);
-                    if (!fontRes.ok) throw new Error(`HTTP error! status: ${fontRes.status}`);
-                    fontBytes = await fontRes.arrayBuffer();
-                } catch (fetchErr) {
-                    console.error("Font fetch error:", fetchErr);
-                    throw new Error("日本語フォントのダウンロードに失敗しました。通信環境を確認してください。");
+                // 先行生成が済んでいれば即座に、まだなら生成を待って取得する
+                let blob = generatedPdfBlob;
+                if (!blob) {
+                    blob = pdfBuildPromise ? await pdfBuildPromise : await buildPdfBlob();
                 }
-                const customFont = await pdfDoc.embedFont(fontBytes);
-
-                // --- 共通のページ生成処理関数 ---
-                // ocrScale: OCR結果のbbox座標を画像座標へ戻す倍率
-                async function createPdfPage(pdfDoc, imgBytes, imgWidth, imgHeight, ocrResult, ocrScale, font) {
-                    const page = pdfDoc.addPage([imgWidth, imgHeight]);
-                    const pdfImage = await pdfDoc.embedJpg(imgBytes);
-
-                    page.drawImage(pdfImage, { x: 0, y: 0, width: imgWidth, height: imgHeight });
-
-                    if (ocrResult && ocrResult.data && ocrResult.data.lines) {
-                        ocrResult.data.lines.forEach(line => {
-                            let validWords = line.words.filter(w => w.confidence >= CONFIDENCE_THRESHOLD);
-                            if (validWords.length === 0) return;
-
-                            validWords.forEach(word => {
-                                let text = removeUnnaturalSpaces(word.text).replace(/\n/g, '').trim();
-                                if (!text) return;
-
-                                // bbox座標を画像座標系へ変換
-                                const x0 = word.bbox.x0 / ocrScale;
-                                const y0 = word.bbox.y0 / ocrScale;
-                                const x1 = word.bbox.x1 / ocrScale;
-                                const y1 = word.bbox.y1 / ocrScale;
-                                const lineWidth = x1 - x0;
-                                const lineHeight = y1 - y0;
-                                if (lineWidth <= 0 || lineHeight <= 0) return;
-
-                                const fontSize = lineHeight * 0.8;
-                                const textWidth = font.widthOfTextAtSize(text, fontSize);
-
-                                let scaleX = 1;
-                                if (textWidth > 0) {
-                                    scaleX = lineWidth / textWidth;
-                                }
-
-                                const yPos = imgHeight - y1 + (lineHeight * 0.1);
-
-                                page.pushOperators(
-                                    PDFLib.pushGraphicsState(),
-                                    PDFLib.concatTransformationMatrix(scaleX, 0, 0, 1, x0, yPos)
-                                );
-
-                                page.drawText(text, {
-                                    x: 0,
-                                    y: 0,
-                                    size: fontSize,
-                                    font: font,
-                                    color: PDFLib.rgb(0, 0, 0),
-                                    opacity: 0, // 完全に透明
-                                });
-
-                                page.pushOperators(PDFLib.popGraphicsState());
-                            });
-                        });
-                    }
-                }
-
-                if (isPdfMode) {
-                    // --- 複数ページ（PDF）モード ---
-                    for (let i = 0; i < pdfPageCanvases.length; i++) {
-                        const canvas = pdfPageCanvases[i];
-                        const result = pdfOcrResults[i];
-                        const scale = pdfOcrScales[i] || 1;
-                        const imgBytes = await getCanvasBytes(canvas);
-                        await createPdfPage(pdfDoc, imgBytes, canvas.width, canvas.height, result, scale, customFont);
-                    }
-                } else {
-                    // --- 単一画像モード ---
-                    const canvas = document.createElement('canvas');
-                    canvas.width = previewImage.naturalWidth;
-                    canvas.height = previewImage.naturalHeight;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(previewImage, 0, 0);
-                    const imgBytes = await getCanvasBytes(canvas);
-
-                    await createPdfPage(pdfDoc, imgBytes, canvas.width, canvas.height, ocrResultData, ocrResultScale, customFont);
-                }
-
-                // PDFファイルの生成とダウンロード
-                const pdfBytes = await pdfDoc.save();
-                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-                const url = URL.createObjectURL(blob);
-
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'ocr_converted.pdf';
-                // モバイルブラウザ（特にiOS Safari）で同一タブ遷移してアプリ画面に
-                // 戻れなくなるのを防ぐため、新しいタブで開く。
-                a.target = '_blank';
-                a.rel = 'noopener';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                // モバイルでは即時revokeするとダウンロード/表示が中断されるため遅延させる
-                setTimeout(() => URL.revokeObjectURL(url), 60000);
-
-                showToast('PDFを保存しました', 'success');
-
+                await deliverPdf(blob, 'ocr_converted.pdf');
             } catch (error) {
                 console.error('PDF Generation Error:', error);
                 showToast(error.message || 'PDFの作成中にエラーが発生しました', 'error');

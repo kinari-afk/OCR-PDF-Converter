@@ -95,6 +95,13 @@
                     </button>
                 </div>
 
+                <div class="flex justify-center mb-4">
+                    <button id="btn-reset" class="text-sm font-medium text-gray-500 hover:text-red-600 transition-colors flex items-center">
+                        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                        最初からやり直す
+                    </button>
+                </div>
+
                 <label class="block text-sm font-medium text-gray-700 mb-2">抽出されたテキスト (プレビュー)</label>
                 <textarea id="extracted-text" rows="6" class="w-full p-4 border border-gray-300 rounded-lg bg-gray-50 focus:ring-blue-500 focus:border-blue-500 text-gray-800 leading-relaxed"></textarea>
             </div>
@@ -117,6 +124,7 @@
         const resultContainer = document.getElementById('result-container');
         const btnSavePdf = document.getElementById('btn-save-pdf');
         const btnCopy = document.getElementById('btn-copy');
+        const btnReset = document.getElementById('btn-reset');
         const extractedText = document.getElementById('extracted-text');
 
         // --- 状態変数 ---
@@ -183,6 +191,28 @@
             };
             reader.readAsDataURL(file);
         }
+
+        // --- リセット処理 ---
+        btnReset.addEventListener('click', () => {
+            // 状態変数のリセット
+            uploadedImageSrc = null;
+            ocrResult = null;
+            isImageLoaded = false;
+            
+            // 入力要素のリセット
+            fileInput.value = '';
+            extractedText.value = '';
+            
+            // UIの切り替え
+            settingsContainer.classList.add('hidden');
+            resultContainer.classList.add('hidden');
+            progressContainer.classList.add('hidden');
+            
+            // ドロップゾーンを元のサイズに戻す
+            dropZone.classList.remove('p-4');
+            dropZone.classList.add('p-8', 'mb-6');
+            dropZone.querySelector('svg').classList.remove('hidden');
+        });
 
         // --- STREAMING_CHUNK:OCR処理の実装 ---
         btnRunOCR.addEventListener('click', async () => {

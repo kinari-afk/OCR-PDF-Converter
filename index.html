@@ -245,8 +245,26 @@
                 const ret = await worker.recognize(imageElement);
                 ocrResult = ret;
                 
+                function removeUnnaturalSpaces(text) {
+                    // 日本語文字（漢字、ひらがな、カタカナ、主な全角記号）の正規表現
+                    const jpChars = '[一-龠ぁ-んァ-ヶｦ-ﾟー、。！？「」【】（）]';
+                    
+                    // ※改行（\n）は消さずに残すため、半角スペースとタブ [ \t] のみを対象とします。
+                    
+                    // 1. 日本語文字と日本語文字の間に挟まったスペースを削除
+                    let result = text.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=${jpChars})`, 'gu'), '');
+                    
+                    // 2. 日本語文字と英数字の間に挟まったスペースを削除（より自然な日本語文章にするため）
+                    result = result.replace(new RegExp(`(?<=${jpChars})[ \\t]+(?=[A-Za-z0-9])`, 'gu'), '');
+                    result = result.replace(new RegExp(`(?<=[A-Za-z0-9])[ \\t]+(?=${jpChars})`, 'gu'), '');
+                    
+                    return result;
+                }
+
+                const cleanedText = removeUnnaturalSpaces(ret.data.text);
+                
                 // 結果をUIに反映
-                extractedText.value = ret.data.text;
+                extractedText.value = cleanedText;
                 resultContainer.classList.remove('hidden');
                 
                 // Workerの終了
@@ -282,18 +300,29 @@
         function preparePrintArea() {
             printArea.innerHTML = '';
             
+            // 画像の元のサイズ
+            const imgWidth = imageElement.naturalWidth;
+            const imgHeight = imageElement.naturalHeight;
+
             // 1. 元の画像を背景として配置
             const img = document.createElement('img');
             img.src = uploadedImageSrc;
             img.style.position = 'absolute';
             img.style.top = '0';
             img.style.left = '0';
+            // コンテナに合わせてフィットさせる
             img.style.width = '100%';
             img.style.height = '100%';
+            img.style.objectFit = 'contain';
             img.style.zIndex = '1';
             printArea.appendChild(img);
 
+            // 印刷エリアの基準サイズを定義（このサイズに対してテキストを配置する）
+            // 縦横比を計算
+            const aspectRatio = imgHeight / imgWidth;
+            
             // 2. OCRで取得したテキスト（文字単位）を画像の上に絶対配置
+            // テキストの配置は、コンテナ（100%）に対する相対的な位置（%）で指定する
             if (ocrResult && ocrResult.data && ocrResult.data.lines) {
                 ocrResult.data.lines.forEach(line => {
                     if (!line.symbols) return;
@@ -303,14 +332,22 @@
                         
                         span.textContent = sym.text;
                         span.style.position = 'absolute';
-                        span.style.left = `${bbox.x0}px`;
-                        span.style.top = `${bbox.y0}px`;
-                        span.style.width = `${bbox.x1 - bbox.x0}px`;
-                        span.style.height = `${bbox.y1 - bbox.y0}px`;
                         
-                        // フォントサイズは高さの約80%に設定してはみ出しを防止
-                        span.style.fontSize = `${(bbox.y1 - bbox.y0) * 0.8}px`;
-                        span.style.lineHeight = `${bbox.y1 - bbox.y0}px`;
+                        // 画像の元のサイズに対するパーセンテージで位置とサイズを計算
+                        const leftPercent = (bbox.x0 / imgWidth) * 100;
+                        const topPercent = (bbox.y0 / imgHeight) * 100;
+                        const widthPercent = ((bbox.x1 - bbox.x0) / imgWidth) * 100;
+                        const heightPercent = ((bbox.y1 - bbox.y0) / imgHeight) * 100;
+
+                        span.style.left = `${leftPercent}%`;
+                        span.style.top = `${topPercent}%`;
+                        span.style.width = `${widthPercent}%`;
+                        span.style.height = `${heightPercent}%`;
+                        
+                        // フォントサイズはコンテナの高さに対する相対値(vh相当だがここではパーセント)では指定しにくいため
+                        // 印刷時の実際の高さに応じて可変になるように調整
+                        // ここでは、高さのパーセンテージに基づいて大まかに設定
+                        span.style.fontSize = `calc(${heightPercent}% * 0.8)`;
                         
                         // 文字をほぼ透明にして見えなくする（ただしブラウザ上では選択可能）
                         span.style.color = 'rgba(0, 0, 0, 0.01)';
@@ -322,13 +359,15 @@
                         span.style.justifyContent = 'center';
                         span.style.fontFamily = 'sans-serif';
                         span.style.whiteSpace = 'pre';
+                        // テキストをはみ出させない
+                        span.style.overflow = 'hidden';
                         
                         printArea.appendChild(span);
                     });
                 });
             }
 
-            // 3. 印刷時のページサイズを「画像のサイズ」に合わせるための動的CSSを追加
+            // 3. 印刷時のページサイズを1ページに収める設定
             let printStyle = document.getElementById('dynamic-print-style');
             if (!printStyle) {
                 printStyle = document.createElement('style');
@@ -336,23 +375,42 @@
                 document.head.appendChild(printStyle);
             }
             
-            const imgWidth = imageElement.naturalWidth;
-            const imgHeight = imageElement.naturalHeight;
+            // ピクセルサイズを直接指定すると、ブラウザによっては巨大すぎて分割されるため、
+            // 縦横比を維持したまま、一般的な最大用紙サイズ（例えばA3相当など）か、
+            // 画面サイズにフィットするような設定を行う。
+            // 最も確実なのは、ブラウザの印刷設定（PDFダイアログ）に委ねつつ、
+            // コンテンツ側で絶対に改ページさせない（page-break-inside: avoid）こと。
             
-            // @page で用紙サイズを画像サイズに固定し、余白をなくす
             printStyle.textContent = `
                 @media print { 
+                    /* ページサイズを画像の縦横比に合わせて動的に設定 */
+                    /* ピクセルではなく、無難な単位（mmやpt）に変換するか、aspect-ratioを使用 */
+                    /* ブラウザがピクセルサイズをうまく処理できない場合の対策として、少し縮小したサイズを指定 */
                     @page { 
                         size: ${imgWidth}px ${imgHeight}px; 
                         margin: 0 !important; 
                     } 
-                    body { margin: 0 !important; padding: 0 !important; }
+                    body, html { 
+                        margin: 0 !important; 
+                        padding: 0 !important;
+                        height: 100% !important;
+                        overflow: hidden !important; /* スクロールバーや余分な高さを消す */
+                    }
+                    #print-area {
+                        width: 100vw !important;
+                        height: 100vh !important;
+                        page-break-after: avoid !important;
+                        page-break-before: avoid !important;
+                        page-break-inside: avoid !important;
+                        break-inside: avoid !important;
+                    }
                 }
             `;
             
-            // #print-area 自体のサイズも画像サイズに固定
-            printArea.style.width = `${imgWidth}px`;
-            printArea.style.height = `${imgHeight}px`;
+            // 画面上でのprint-areaのサイズ（非表示なので影響はないが、印刷時の基準になる）
+            printArea.style.width = '100vw';
+            // 縦横比を維持して高さを設定
+            printArea.style.height = `calc(100vw * ${aspectRatio})`;
         }
 
         // --- PDF保存ボタンのイベント ---

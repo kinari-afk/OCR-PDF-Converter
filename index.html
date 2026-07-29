@@ -69,6 +69,23 @@
                     <img id="preview-image" class="object-contain h-full max-w-full rounded shadow-sm" alt="プレビュー">
                 </div>
                 
+                <div class="bg-indigo-50/50 border border-indigo-100 rounded-xl p-4 shadow-sm">
+                    <h3 class="font-bold text-gray-700 mb-3 text-sm flex items-center">
+                        <svg class="w-4 h-4 mr-1 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        読み取り設定（精度向上のため選択してください）
+                    </h3>
+                    <div class="flex flex-col sm:flex-row gap-4">
+                        <label class="flex items-center space-x-2 text-sm text-gray-700 cursor-pointer bg-white p-3 rounded-lg border hover:border-indigo-400 transition flex-1">
+                            <input type="radio" name="textDirection" value="jpn+eng" class="form-radio text-indigo-600 h-4 w-4" checked>
+                            <span class="font-medium">横書き <span class="text-xs text-gray-500 font-normal">(日+英数字交じり)</span></span>
+                        </label>
+                        <label class="flex items-center space-x-2 text-sm text-gray-700 cursor-pointer bg-white p-3 rounded-lg border hover:border-indigo-400 transition flex-1">
+                            <input type="radio" name="textDirection" value="jpn_vert" class="form-radio text-indigo-600 h-4 w-4">
+                            <span class="font-medium">縦書き <span class="text-xs text-gray-500 font-normal">(日本語のみ)</span></span>
+                        </label>
+                    </div>
+                </div>
+
                 <div class="flex justify-center">
                     <button id="btn-run-ocr" class="bg-indigo-600 text-white px-8 py-3 rounded-full font-bold text-lg shadow-lg hover:bg-indigo-700 hover:shadow-xl transition-all transform hover:-translate-y-1 w-full md:w-auto flex justify-center items-center">
                         <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
@@ -129,14 +146,61 @@
         let pdfPagesImages = []; // Canvas要素を格納
         let pdfOcrResults = [];  // Tesseractのパース結果を格納
 
+        // 信頼度の低いノイズを弾きつつテキストを抽出する関数（ゴミ文字対策）
+        function extractCleanText(ocrData) {
+            if (!ocrData || !ocrData.lines) return '';
+            let textArray = [];
+            
+            ocrData.lines.forEach(line => {
+                let lineText = '';
+                if (line.words) {
+                    line.words.forEach(word => {
+                        // 認識信頼度が低い（40未満）ものはシミや罫線の誤認とみなして除外
+                        if (word.confidence >= 40) {
+                            lineText += word.text + ' ';
+                        }
+                    });
+                }
+                lineText = lineText.trim();
+                if (lineText) textArray.push(lineText);
+            });
+            
+            return removeUnnaturalSpaces(textArray.join('\n'));
+        }
+
         // 不自然な半角スペースを除去する関数
         function removeUnnaturalSpaces(text) {
             if (!text) return '';
-            // 日本語と日本語の間、日本語と英数字の間の半角スペースを削除
-            let res = text.replace(/([あ-んア-ン一-龥ー])\s+([あ-んア-ン一-龥ーa-zA-Z0-9])/g, '$1$2');
-            res = res.replace(/([a-zA-Z0-9])\s+([あ-んア-ン一-龥ー])/g, '$1$2');
-            // 余分なスペースの連続を一つに
-            res = res.replace(/ {2,}/g, ' ');
+            
+            let res = text;
+            let prevRes;
+            
+            // 繰り返し処理で、連続するスペース入り文字（例：「あ い う」）を確実に結合する
+            // Tesseract特有の細切れスペースを完全に除去します
+            do {
+                prevRes = res;
+                // [^\x01-\x7E] はASCII以外の文字（日本語などの全角文字）
+                
+                // 1. 全角文字と全角文字の間の半角スペースを削除
+                res = res.replace(/([^\x01-\x7E])\x20+([^\x01-\x7E])/g, '$1$2');
+                
+                // 2. 全角文字と半角英数字の間の半角スペースを削除
+                res = res.replace(/([^\x01-\x7E])\x20+([a-zA-Z0-9])/g, '$1$2');
+                
+                // 3. 半角英数字と全角文字の間の半角スペースを削除
+                res = res.replace(/([a-zA-Z0-9])\x20+([^\x01-\x7E])/g, '$1$2');
+            } while (prevRes !== res);
+
+            // 4. 日本語の句読点や括弧の周りにある半角スペースを削除
+            res = res.replace(/\x20*([、。！？「」『』（）［］【】])\x20*/g, '$1');
+
+            // 5. 行頭・行末の半角スペースを削除
+            res = res.replace(/\x20*\n\x20*/g, '\n');
+            res = res.replace(/^\x20+|\x20+$/g, '');
+
+            // 6. 最後に残った連続するスペース（英語同士の間など）を1つにまとめる
+            res = res.replace(/\x20{2,}/g, ' ');
+
             return res;
         }
 
@@ -235,11 +299,14 @@
             stepResults.classList.remove('hidden');
             resultActions.classList.add('hidden');
             progressBar.style.width = '10%';
-            progressText.textContent = 'OCRエンジンを準備中...';
+            progressText.textContent = 'OCRエンジンと辞書データを準備中... (初回は少し時間がかかります)';
             
             try {
-                // Tesseractのワーカーを生成
-                const worker = await Tesseract.createWorker('jpn');
+                // 選択されたテキストの方向（言語設定）を取得
+                const selectedLang = document.querySelector('input[name="textDirection"]:checked').value;
+                
+                // Tesseractのワーカーを生成 (選択された言語を読み込む)
+                const worker = await Tesseract.createWorker(selectedLang);
                 let combinedText = '';
                 
                 pdfPagesImages = [];
@@ -272,7 +339,7 @@
                         pdfOcrResults.push(ret);
                         
                         combinedText += `--- ページ ${i} ---\n`;
-                        combinedText += removeUnnaturalSpaces(ret.data.text) + '\n\n';
+                        combinedText += extractCleanText(ret.data) + '\n\n';
                     }
                 } else {
                     // --- 画像の場合: 1枚だけ処理 ---
@@ -290,7 +357,7 @@
                     const ret = await worker.recognize(canvas);
                     pdfOcrResults.push(ret);
                     
-                    combinedText = removeUnnaturalSpaces(ret.data.text);
+                    combinedText = extractCleanText(ret.data);
                 }
                 
                 await worker.terminate();
@@ -361,27 +428,45 @@
                     const imgBytes = await getCanvasBytes(canvas);
                     const pdfImage = await pdfDoc.embedJpg(imgBytes);
                     
-                    // キャンバスと同じピクセルサイズでページを作成
-                    const page = pdfDoc.addPage([canvas.width, canvas.height]);
+                    const imgWidth = canvas.width;
+                    const imgHeight = canvas.height;
+                    const page = pdfDoc.addPage([imgWidth, imgHeight]);
                     
                     // 背景として画像を描画
                     page.drawImage(pdfImage, {
                         x: 0,
                         y: 0,
-                        width: canvas.width,
-                        height: canvas.height,
+                        width: imgWidth,
+                        height: imgHeight,
                     });
                     
-                    // 行(Line)単位で透明なテキストを配置
-                    if (ocrResult && ocrResult.data && ocrResult.data.lines) {
-                        ocrResult.data.lines.forEach(line => {
-                            const text = removeUnnaturalSpaces(line.text);
-                            const bbox = line.bbox;
+                    // 単語(Word)単位で透明なテキストを配置し、位置ズレを最小限にする
+                    if (ocrResult && ocrResult.data && ocrResult.data.words) {
+                        ocrResult.data.words.forEach(word => {
+                            // 認識信頼度が低い（40未満など）場合は、ノイズや罫線の誤認として除外（ゴミ文字対策）
+                            if (word.confidence < 40) return;
+
+                            // 単語内の不要なスペースを除去
+                            const text = word.text.replace(/\s+/g, '');
+                            if (!text) return;
+
+                            const bbox = word.bbox;
                             
-                            // PDFの座標系は左下が原点 (0,0) のため、CanvasのY座標を変換
-                            const pdfY = canvas.height - bbox.y1;
-                            // 高さからフォントサイズを推測 (少し小さめに設定してはみ出しを防止)
-                            const fontSize = (bbox.y1 - bbox.y0) * 0.8;
+                            // 座標とサイズの計算
+                            const wordWidth = bbox.x1 - bbox.x0;
+                            const wordHeight = bbox.y1 - bbox.y0;
+                            
+                            // フォントサイズは高さベースにするが、少し小さめに（はみ出し防止）
+                            let fontSize = wordHeight * 0.8;
+                            
+                            // 横幅が狭い（文字が詰まっている）場合は横幅に合わせてフォントサイズを縮小
+                            const estCharWidth = wordWidth / text.length;
+                            if (estCharWidth < fontSize) {
+                                fontSize = estCharWidth * 1.1; 
+                            }
+                            
+                            // PDFの座標系(左下原点)への変換と、日本語フォントのベースライン(下端の余白)補正
+                            const pdfY = canvas.height - bbox.y1 + (fontSize * 0.2);
                             
                             try {
                                 page.drawText(text, {
